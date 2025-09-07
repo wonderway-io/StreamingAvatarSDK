@@ -7,6 +7,7 @@ export interface StreamingAvatarApiConfig {
   token: string;
   basePath?: string;
   userAudioWebsocketPath?: string;
+  authToken?: string;
 }
 
 export enum AvatarQuality {
@@ -76,6 +77,8 @@ export enum StreamingEvents {
   USER_SILENCE = "user_silence",
   STREAM_READY = "stream_ready",
   STREAM_DISCONNECTED = "stream_disconnected",
+  USER_TRANSCRIPT = "user_transcript",
+  ASSISTANT_TRANSCRIPT = "assistant_transcript",
 }
 export type EventHandler = (...args: any[]) => void;
 export interface EventData {
@@ -109,6 +112,16 @@ export interface UserTalkingEndEvent extends EventData {
   type: StreamingEvents.USER_END_MESSAGE;
 }
 
+export interface UserTranscript extends EventData {
+  type: StreamingEvents.USER_TRANSCRIPT;
+  message: string;
+}
+
+export interface AssistantTranscript extends EventData {
+  type: StreamingEvents.ASSISTANT_TRANSCRIPT;
+  message: string;
+}
+
 type StreamingEventTypes =
   | StreamingStartTalkingEvent
   | StreamingStopTalkingEvent
@@ -120,12 +133,15 @@ type StreamingEventTypes =
 interface WebsocketBaseEvent {
   [key: string]: unknown;
 }
+
 interface UserStartTalkingEvent extends WebsocketBaseEvent {
   event_type: StreamingEvents.USER_START;
 }
+
 interface UserStopTalkingEvent extends WebsocketBaseEvent {
   event_type: StreamingEvents.USER_STOP;
 }
+
 interface UserSilenceEvent extends WebsocketBaseEvent {
   event_type: StreamingEvents.USER_SILENCE;
   silence_times: number;
@@ -135,7 +151,9 @@ interface UserSilenceEvent extends WebsocketBaseEvent {
 type StreamingWebSocketEventTypes =
   | UserStartTalkingEvent
   | UserStopTalkingEvent
-  | UserSilenceEvent;
+  | UserSilenceEvent
+  | UserTranscript
+  | AssistantTranscript;
 
 class APIError extends Error {
   public status: number;
@@ -166,19 +184,22 @@ class StreamingAvatar {
   private language: string | undefined;
   private userAudioWebsocketPath: string | undefined;
   private realtimeEndpoint: string | undefined;
+  private authToken: string | undefined;
 
   constructor({
     token,
     basePath = "https://api.heygen.com",
     userAudioWebsocketPath,
+    authToken,
   }: StreamingAvatarApiConfig) {
     this.token = token;
     this.basePath = basePath;
     this.userAudioWebsocketPath = userAudioWebsocketPath;
+    this.authToken = authToken;
   }
 
   public async createStartAvatar(
-    requestData: StartAvatarRequest
+    requestData: StartAvatarRequest,
   ): Promise<any> {
     const sessionInfo = await this.newSession(requestData);
     this.sessionId = sessionInfo.session_id;
@@ -200,7 +221,7 @@ class StreamingAvatar {
       let eventMsg: StreamingEventTypes | null = null;
       try {
         const messageString = new TextDecoder().decode(
-          roomMessage as ArrayBuffer
+          roomMessage as ArrayBuffer,
         );
         eventMsg = JSON.parse(messageString) as StreamingEventTypes;
       } catch (e) {
@@ -248,7 +269,7 @@ class StreamingAvatar {
   }
 
   public async startVoiceChat(
-    requestData: { useSilencePrompt?: boolean } = {}
+    requestData: { useSilencePrompt?: boolean } = {},
   ) {
     requestData.useSilencePrompt = requestData.useSilencePrompt || false;
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -281,7 +302,7 @@ class StreamingAvatar {
       this.scriptProcessor = this.audioContext?.createScriptProcessor(
         512,
         1,
-        1
+        1,
       );
 
       this.mediaStreamAudioSource.connect(this.scriptProcessor);
@@ -302,7 +323,7 @@ class StreamingAvatar {
           },
         });
         const encodedFrame = new Uint8Array(
-          this.audioRawFrame?.encode(frame).finish()
+          this.audioRawFrame?.encode(frame).finish(),
         );
         this.webSocket?.send(encodedFrame);
       };
@@ -338,7 +359,7 @@ class StreamingAvatar {
   }
 
   public async newSession(
-    requestData: StartAvatarRequest
+    requestData: StartAvatarRequest,
   ): Promise<StartAvatarResponse> {
     return this.request("/v1/streaming.new", {
       avatar_name: requestData.avatarName,
@@ -381,7 +402,7 @@ class StreamingAvatar {
         },
       });
       const encodedFrame = new Uint8Array(
-        this.audioRawFrame?.encode(frame).finish()
+        this.audioRawFrame?.encode(frame).finish(),
       );
       this.webSocket?.send(encodedFrame);
       return;
@@ -431,7 +452,7 @@ class StreamingAvatar {
   private async request(
     path: string,
     params: CommonRequest,
-    config?: any
+    config?: any,
   ): Promise<any> {
     try {
       const response = await fetch(this.getRequestUrl(path), {
@@ -448,7 +469,7 @@ class StreamingAvatar {
         throw new APIError(
           `API request failed with status ${response.status}`,
           response.status,
-          errorText
+          errorText,
         );
       }
 
@@ -473,16 +494,20 @@ class StreamingAvatar {
     if (this.language) {
       websocketUrl += `&stt_language=${this.language}`;
     }
+    if (this.authToken) {
+      websocketUrl += `&auth_token=${this.authToken}`;
+    }
     this.webSocket = new WebSocket(websocketUrl);
     this.webSocket.addEventListener("message", (event) => {
       let eventData: StreamingWebSocketEventTypes | null = null;
       try {
         eventData = JSON.parse(event.data);
       } catch (e) {
-        console.error(e);
+        // Silencing the logs here. If it isn't a JSON, it is an audio object
         return;
       }
-      this.emit(eventData.event_type, eventData);
+      if (!eventData.event_type) return; // Returning events only with event_type
+      this.emit(eventData.event_type as string, eventData);
     });
     this.webSocket.addEventListener("close", (event) => {
       this.webSocket = null;
